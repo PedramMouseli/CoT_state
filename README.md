@@ -2,6 +2,8 @@
 
 Code for the paper *Computation, Not Memory: Chain-of-Thought and State Tracking in LLM Agents* by Pedram Mouseli and Massieh Moayedi.
 
+[Paper (arXiv)](https://arxiv.org/abs/2610.25760) · [Project page](https://pedrammouseli.github.io/CoT_state/)
+
 We study how an LLM agent's actions depend on its reasoning when the correct action depends on a changing state. The agent works in a small file-system environment: it must move every unlocked log file to an archive, while background events toggle file locks and announce which file changed but not its new value. We separate generating reasoning before each action from retaining earlier reasoning in the prompt, test whether the content of the reasoning matters, and compare linear probes and activation patching with the agent's actions.
 
 ## Installation
@@ -46,10 +48,12 @@ Each script documents its arguments with `--help`.
 
 ## Citation
 
-<!-- ```bibtex
+```bibtex
 @misc{mouseli2026computation,
   title  = {Computation, Not Memory: Chain-of-Thought and State Tracking in {LLM} Agents},
-  author = {Mouseli, Pedram and Moayedi, Messiah},
-  year   = {2026}
-} -->
+  author = {Mouseli, Pedram and Moayedi, Massieh},
+  year   = {2026},
+  eprint = {2610.25760},
+  archivePrefix = {arXiv}
+}
 ```

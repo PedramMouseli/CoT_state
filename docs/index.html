@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computation, Not Memory</title>
+<meta name="description" content="Chain-of-thought and state tracking in LLM agents: generating reasoning at each step matters more than retaining it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Computation, Not Memory: Chain-of-Thought and State Tracking in LLM Agents</h1>
+  <p class="authors">Pedram Mouseli &nbsp;&nbsp; Massieh Moayedi</p>
+  <p class="affil">University of Toronto</p>
+  <div class="links">
+    <a href="https://arxiv.org/abs/2610.25760"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6V2zm8 1.5V8h4.5L14 3.5zM8.5 12h9v1.5h-9V12zm0 3.5h9V17h-9v-1.5z"/></svg>Paper</a>
+    <a href="https://github.com/PedramMouseli/CoT_state"><svg viewBox="0 0 24 24"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg>Code</a>
+    <a href="#citation"><svg viewBox="0 0 24 24"><path d="M7 7h4v4H9c0 1.7.6 3 2 3.5V17c-3-.5-4-3-4-6V7zm7 0h4v4h-2c0 1.7.6 3 2 3.5V17c-3-.5-4-3-4-6V7z"/></svg>BibTeX</a>
+  </div>
+</header>
+
+<div class="tldr">
+  Language-model agents often reason before they act, and proposals to monitor such agents depend on how their actions relate to that reasoning.
+  Reasoning could help an agent in two ways: as computation when it decides what to do, or as memory that it keeps for later turns.
+  We separate these roles in a small file-system task where the correct action depends on a changing lock state, using Qwen3-8B and Qwen3.5-9B.
+  <b>Reasoning written at the moment of action</b> prevents most rule violations, while <b>retaining earlier reasoning</b> in the prompt adds little.
+  The agent acts on the reasoning in its context, and the state that can be decoded from its activations without reasoning does not tell which interventions change its actions.
+</div>
+
+<div class="findings">
+  <a class="finding" href="#generate"><div class="num">20.9 vs 0.5</div><p>Percentage points of lock violations removed by generating reasoning versus retaining it (Qwen3-8B).</p></a>
+  <a class="finding" href="#content"><div class="num">49% &rarr; 6%</div><p>Violations per attempt on identical histories with the model's own reasoning. Filler, other reasoning and a state table do not do this.</p></a>
+  <a class="finding" href="#swap"><div class="num">43 of 114</div><p>Pairs in which the agent moves a locked file after receiving reasoning written for the unlocked version.</p></a>
+  <a class="finding" href="#probes"><div class="num">0.99 vs 0.02</div><p>Decoding accuracy of the best probe versus the largest fraction of the patching effect it recovers.</p></a>
+</div>
+
+<!-- 1. Task -->
+<section id="task">
+  <p class="kicker">The task</p>
+  <h2>Moving files while locks change in the background</h2>
+  <p>The agent works in a small file system with three log files and <code>report.txt</code>. It must archive every unlocked log file, never touch a locked file, and leave <code>report.txt</code> locked. After the agent's second, fourth and sixth commands, a background job toggles the lock of one file. The announcement names the file but not its new value, so the agent has to work out the current locks from its history.</p>
+
+  <div class="demo" id="episode">
+    <div class="demo-bar">
+      <div class="seg" data-group="mode">
+        <button data-v="direct" class="on">No reasoning</button>
+        <button data-v="think">With reasoning</button>
+      </div>
+      <button class="replay">&#8635; Replay</button>
+    </div>
+    <div class="episode-grid">
+      <div class="fs">
+        <div class="label">True state</div>
+        <div class="dir"><div class="dir-name">/logs</div><div class="slots" data-dir="1"></div></div>
+        <div class="dir"><div class="dir-name">/archive</div><div class="slots" data-dir="0"></div></div>
+        <p class="fs-note"><b>?</b> marks a toggle. The agent is told which file changed, not whether it is now locked.</p>
+      </div>
+      <div class="term">
+        <div class="term-head"><i></i><i></i><i></i>&nbsp;agent transcript</div>
+        <div class="term-body"></div>
+      </div>
+    </div>
+    <div class="verdict"></div>
+  </div>
+  <p class="caption">A real episode of Qwen3-8B (seed 304), run once with reasoning disabled and once with reasoning enabled. Both runs start from the same state and receive the same toggles. Reasoning excerpts are verbatim and shortened.</p>
+</section>
+
+<!-- 2. Generating vs retaining -->
+<section id="generate">
+  <p class="kicker">Question 1</p>
+  <h2>Generating reasoning matters more than retaining it</h2>
+  <p>Reasoning can help in two ways. <b>Generating</b> it before an action gives the model extra computation at the moment of decision. <b>Retaining</b> it in later prompts gives the model notes that it could consult instead of working out the state again. We vary the two separately. The observations and executed commands always stay in the prompt.</p>
+
+  <div class="demo" id="conditions">
+    <div class="demo-bar">
+      <div class="seg" data-group="model">
+        <button data-v="q3" class="on">Qwen3-8B</button>
+        <button data-v="q35">Qwen3.5-9B</button>
+      </div>
+      <button class="replay">&#8635; Replay</button>
+    </div>
+    <div class="cond-grid">
+      <div>
+        <div class="label">What the prompt contains at turn 3</div>
+        <div class="cond-name"></div>
+        <div class="prompt"></div>
+        <div class="legend">
+          <span style="--c: var(--soft)">observation</span>
+          <span style="--c: var(--think-soft)">reasoning</span>
+          <span style="--c: var(--soft)">reply text</span>
+          <span style="--c: var(--ink)">command</span>
+        </div>
+      </div>
+      <div>
+        <div class="label">Violation rate</div>
+        <div class="bars" id="cond-bars"></div>
+      </div>
+    </div>
+    <div class="deltas">
+      <div class="delta gen"><b data-k="gen"></b><span>Effect of generating reasoning<br>(direct/cmd &minus; think/cmd)</span></div>
+      <div class="delta ret"><b data-k="ret"></b><span>Effect of retaining reasoning<br>(think/cmd &minus; think/full)</span></div>
+    </div>
+  </div>
+  <p class="caption">Violation rate: lock-violating commands divided by eligible attempts to move or delete a file. Conditions are named by mode (think or direct) and by what is retained from earlier replies (full, body or cmd). Qwen3-8B: 500 episodes per condition; Qwen3.5-9B: 300. Retention does matter for task completion in Qwen3.5-9B, raising strict success from 53% to 65%.</p>
+</section>
+
+<!-- 3. Fixed histories -->
+<section id="content">
+  <p class="kicker">Question 2</p>
+  <h2>The content of the reasoning matters</h2>
+  <p>Agents that reason also end up in different states from agents that do not. To compare like with like, we take 400 saved prompts and complete each one with a different thought block. Only the thought block changes.</p>
+
+  <div class="demo" id="fixed">
+    <div class="demo-bar">
+      <div class="label" style="margin:0">One saved history, five thought blocks</div>
+      <button class="replay">&#8635; Replay</button>
+    </div>
+    <div class="fixed-grid">
+      <div>
+        <div class="mini-term" id="fixed-hist"></div>
+        <div class="slot"><div class="arm"></div><div class="content"></div></div>
+        <div class="outcome"></div>
+      </div>
+      <div>
+        <div class="label">Violations per attempt, all 400 prompts (Qwen3-8B)</div>
+        <div class="bars" id="fixed-bars"></div>
+      </div>
+    </div>
+  </div>
+  <p class="caption">Example from Qwen3-8B (episode 76, turn 3). At this point <code>gamma.log</code> is locked. Reasoning and commands are produced by greedy decoding. Other-history reasoning was written by the same model for a different episode. Qwen3.5-9B shows the same pattern: own reasoning lowers the rate from 40% to 4%.</p>
+</section>
+
+<!-- 4. Swap -->
+<section id="swap">
+  <p class="kicker">Question 2, continued</p>
+  <h2>The action follows the reasoning, even against the history</h2>
+  <p>We build pairs of prompts that differ in one fact: the initial lock of one log file. The model writes its own reasoning for each version. We then give each version the reasoning written for the other one.</p>
+
+  <div class="demo" id="swapdemo">
+    <div class="demo-bar">
+      <div class="seg" data-group="model">
+        <button data-v="q3" class="on">Qwen3-8B</button>
+        <button data-v="q35">Qwen3.5-9B</button>
+      </div>
+      <button class="replay">&#8635; Replay</button>
+    </div>
+    <div class="swap-grid">
+      <div class="swap-col">
+        <h4>History A: <span class="hl">gamma.log: locked</span></h4>
+        <div class="mini-term" data-hist="L"></div>
+        <div class="rcard" data-pos="L"></div>
+        <div class="outcome" data-out="L"></div>
+      </div>
+      <div class="swap-col">
+        <h4>History B: <span class="hl">gamma.log: unlocked</span></h4>
+        <div class="mini-term" data-hist="U"></div>
+        <div class="rcard" data-pos="U"></div>
+        <div class="outcome" data-out="U"></div>
+      </div>
+    </div>
+    <div class="counts">
+      <div></div><div class="h">Reasoning written for A (locked)</div><div class="h">Reasoning written for B (unlocked)</div>
+      <div class="h">History A (locked)</div><div class="n" data-c="LL"></div><div class="n" data-c="LU"></div>
+      <div class="h">History B (unlocked)</div><div class="n" data-c="UL"></div><div class="n" data-c="UU"></div>
+    </div>
+  </div>
+  <p class="caption">Example pair from Qwen3-8B (episode 219, turn 2). The table counts pairs in which the agent moves the file. In history A, moving it violates the rule. When the reasoning is held fixed, changing the history changes whether the file is moved in at most two pairs.</p>
+</section>
+
+<!-- 5. Probes -->
+<section id="probes">
+  <p class="kicker">Question 3</p>
+  <h2>A state that can be decoded is not necessarily the one that is used</h2>
+  <p>Without reasoning, can we read the state from the model instead? Linear probes recover the lock state from the activations about as well as a text classifier recovers it from the transcript (balanced accuracy 0.79 and 0.77). To test which directions affect the model's answer, we ask "Is the file locked?" on both versions of a counterfactual pair. We then copy the locked version's activation at the final token into the unlocked version, along one direction only. The <b>recovered fraction R</b> says how far this moves the answer: 0 means no change, and 1 means the answer of the locked version.</p>
+
+  <div class="demo" id="probedemo">
+    <div class="demo-bar">
+      <div class="layerpick">
+        <label for="layer">Layer</label>
+        <input type="range" id="layer" min="0" max="8" step="1" value="4">
+        <span id="layer-v" class="mono"></span>
+      </div>
+      <button class="replay">&#8635; Replay</button>
+    </div>
+    <div class="probe-grid">
+      <div>
+        <div class="label">Answer after patching along</div>
+        <div class="probe-dir" id="probe-dir"></div>
+        <div class="gauge">
+          <div class="scale"></div>
+          <div class="tick" style="left:0%"></div>
+          <div class="tick" style="left:90.9%"></div>
+          <div class="full" id="full-mark"><span>whole activation</span></div>
+          <div class="needle" data-v=""></div>
+          <div class="end" style="left:0">0<br>unlocked version</div>
+          <div class="end" style="right:9.1%; text-align:right">1<br>locked version</div>
+        </div>
+        <p class="caption">Click a direction to show it on the scale. The dashed mark shows the effect of copying the whole final-token activation.</p>
+      </div>
+      <div class="dirs" id="dirs"></div>
+    </div>
+  </div>
+  <p class="caption">Qwen3-8B, final token of the state question, 120 held-out counterfactual pairs, layers 20 to 35. Decoding: AUROC on held-out ordinary prompts, with bars drawn from chance (0.5) to perfect (1.0). The logistic probe decodes the state almost perfectly from layer 22 on, but never recovers more than 0.02. R can slightly exceed 1 when a patch moves the answer a little past the locked version's answer, as the counterfactual direction does in the last two layers. On the same prefixes, the state question and the direct action also depend on different parts of the context (Section 7 of the paper).</p>
+</section>
+
+<section id="takeaways">
+  <h2>Takeaways</h2>
+  <ul class="takeaways">
+    <li>In this task, the benefit of reasoning for rule-following comes mainly from generating it at each step, not from retaining it as memory.</li>
+    <li>The benefit depends on what the reasoning says, and the agent's next action follows the reasoning in its context.</li>
+    <li>An accurate readout of the state, from probes or from the model's answers, does not show how the state reaches the action. Readouts should be tested against the behavior they are meant to explain.</li>
+  </ul>
+</section>
+
+<section id="citation">
+  <h2>Citation</h2>
+<pre class="bib">@misc{mouseli2026computation,
+  title  = {Computation, Not Memory: Chain-of-Thought and State Tracking in {LLM} Agents},
+  author = {Mouseli, Pedram and Moayedi, Massieh},
+  year   = {2026},
+  eprint = {2610.25760},
+  archivePrefix = {arXiv}
+}</pre>
+</section>
+
+<footer>University of Toronto</footer>
+</main>
+<script src="main.js"></script>
+</body>
+</html>
